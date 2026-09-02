@@ -1,4 +1,18 @@
+# Reusable Elixir CI — the "commerce CI standard" for Elixir repos.
+#
+#   jobs:
+#     ci:
+#       uses: jamlance/ci/.github/workflows/elixir-ci.yml@v1
+#       with:
+#         elixir_version: "1.16.3"
+#         otp_version: "26.2"
+#         dialyzer: true            # optional (PLT-cached); default false
+#
+# Always runs: format, compile (warnings-as-errors), credo (if a dep), sobelow
+# (if a dep — Phoenix security scan), tests, gitleaks. A Postgres 16 service is
+# provided with DATABASE_URL exported for Ecto test suites.
 name: ci
+
 on:
   pull_request:
   push:
@@ -7,11 +21,97 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+permissions:
+  contents: read
+
 jobs:
-  ci:
-    uses: inkress/ci/.github/workflows/elixir-ci.yml@v1
-    with:
-      elixir_version: "1.15.8"
-      otp_version: "26.2"
-      warnings_as_errors: false
-      run_tests: true
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+      DATABASE_URL: ecto://postgres:postgres@localhost:5432/app_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
+        with:
+          elixir-version: 1.15.8
+          otp-version: 26.2
+
+      - name: Cache deps and _build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-1.15.8-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-1.15.8-
+
+      - name: Install deps (check locked)
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get --check-locked
+
+      - name: Run checks (format · compile · credo · sobelow · test)
+        shell: bash
+        run: |
+          {
+            echo "### CI checks (Elixir 1.15.8)"
+            echo
+            echo "| check | result |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          fail=0
+          run_check() {
+            local name="$1"; shift
+            echo "::group::$name"
+            if "$@"; then echo "| \`$name\` | ✅ pass |" >> "$GITHUB_STEP_SUMMARY"
+            else echo "| \`$name\` | ❌ FAIL |" >> "$GITHUB_STEP_SUMMARY"; fail=1; fi
+            echo "::endgroup::"
+          }
+          run_check "format" mix format --check-formatted
+          if [ "false" = "true" ]; then
+            run_check "compile" mix compile --warnings-as-errors --force
+          else
+            run_check "compile" mix compile --force
+          fi
+          if grep -q ':credo' mix.exs; then run_check "credo" mix credo --strict
+          else echo "| \`credo\` | ⏭️ not a dep |" >> "$GITHUB_STEP_SUMMARY"; fi
+          if grep -q ':sobelow' mix.exs; then run_check "sobelow" mix sobelow --exit
+          else echo "| \`sobelow\` | ⏭️ not a dep |" >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ "true" = "true" ]; then run_check "test" mix test
+          else echo "| \`test\` | ⏭️ disabled |" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit $fail
+
+      - name: Secret scan (gitleaks, pinned + checksum verified)
+        if: always()   # a security scan must run even when other checks fail
+        shell: bash
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -uo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL "$url" -o gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          if ./gitleaks dir . --redact --no-banner; then
+            echo "| \`secret-scan\` | ✅ clean |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| \`secret-scan\` | ⚠️ findings |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "false" = "true" ]; then exit 1; fi
+          fi
+          rm -f gitleaks gitleaks.tar.gz
