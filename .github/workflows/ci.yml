@@ -1,0 +1,17 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  ci:
+    uses: inkress/ci/.github/workflows/elixir-ci.yml@v1
+    with:
+      elixir_version: "1.15.8"
+      otp_version: "26.2"
+      warnings_as_errors: false
+      run_tests: true
