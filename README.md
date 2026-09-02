@@ -2,11 +2,13 @@
 
 A thin, idiomatic Elixir wrapper for the [Inkress](https://inkress.com) API.
 
-Scope is deliberately small — two things:
+Scope is deliberately small:
 
 - **Create orders** — `Inkress.Orders.create/2` (`POST /api/v1/orders`)
-- **Verify webhooks** — `Inkress.Webhooks.verify/2` (checks the `x-inkress-signature`
-  HS256 JWT and hands you a typed event)
+- **Create payment links** — `Inkress.PaymentLinks.create/2` (`POST /api/v1/payment_links`), the
+  server-side checkout primitive: create a link, send the customer to its hosted pay page
+- **Verify webhooks** — `Inkress.Webhooks.verify/2` (checks the signed webhook JWT and hands
+  you a typed event, with accessors that work across both wire shapes)
 
 Everything returns idiomatic `{:ok, _}` / `{:error, _}` tuples. No global state, no
 config files required — you pass an explicit client.
@@ -17,7 +19,7 @@ config files required — you pass an explicit client.
 # mix.exs
 def deps do
   [
-    {:inkress, "~> 0.1"}
+    {:inkress, "~> 0.2"}
   ]
 end
 ```
@@ -95,22 +97,64 @@ client = Inkress.new(api_token: "sk_live_…", merchant_username: "my-store")
 Omit `unit_price` (or use a non-secret token) and the line is priced from the catalog as
 usual. See `docs/custom-pricing-design.md` for the design and trust model.
 
+## Creating a payment link (server-side checkout)
+
+A payment link is created server-side and paid by the customer on Inkress's hosted page
+(`…/p/<uid>`), where the browser supplies the fraud/3-DS context. Prefer this over a
+checkout *session* for server-to-server flows — a session runs the risk gate at creation
+and needs a browser risk reference, so a bare server call is declined.
+
+```elixir
+client = Inkress.new(api_token: "sk_live_…", merchant_username: "nkc")
+
+{:ok, link} =
+  Inkress.PaymentLinks.create(client, %{
+    title: "Invoice #4821 — Deep Cleaning",
+    total: 33_600,                # omit for a customer-entered amount
+    currency_code: "JMD",         # or currency_id: 1
+    reference_id: "4821",         # mirrored into data.reference_id; comes back on the webhook
+    data: %{redirect_url: "https://newkingstoncleaning.com/thanks"}
+  })
+
+redirect_to(Inkress.PaymentLinks.pay_url(client, link.uid))   #=> https://inkress.com/p/<uid>
+```
+
+Payment links have no native `reference_id` column, so pass `:reference_id` (it is mirrored
+into `data.reference_id`) and, if you reconcile off the flat webhook, encode it in `:title`
+too. When the customer pays, Inkress creates the order and sends an `orders.<status>` webhook.
+`Inkress.create_payment_link/2` is a convenience alias.
+
 ## Verifying a webhook
 
-Inkress signs every webhook as an HS256 JWT (signed with your `whsec_…` webhook
-secret) and delivers it in the `x-inkress-signature` header. The JWT's claims *are*
-the event. `verify/2` checks the signature and returns a typed event — no client needed.
+Inkress signs webhooks as an HS256 JWT (the JWT's claims *are* the event) and delivers
+them in two shapes the SDK normalises for you:
+
+- **Modern** — an envelope keyed by `"event"` (e.g. `"orders.paid"`) with the order under `"order"`.
+- **Flat (provider/facilitator)** — top-level `"status"`, `"reference"`, `"amount"`,
+  `"card_suffix"`, `"client"`, `"title"` (this is what current provider/hosted-checkout
+  webhooks deliver, as a `jwt` form param).
+
+`verify/2` checks the signature and returns a typed event — no client needed. Use the
+**accessor functions** (`status/1`, `reference/1`, `amount/1`, `customer_email/1`,
+`card_last4/1`, `order/1`, `title/1`) so your handler works regardless of shape:
 
 ```elixir
 # In a Plug/Phoenix controller
 signature = conn |> Plug.Conn.get_req_header("x-inkress-signature") |> List.first()
 
-case Inkress.Webhooks.verify(signature, System.fetch_env!("INKRESS_WEBHOOK_SECRET")) do
-  {:ok, %Inkress.Webhook.Event{type: :order_paid, data: data}} ->
-    fulfill_order(data["order"])
+alias Inkress.Webhook.Event
+
+case Inkress.Webhooks.verify(signature, webhook_secret) do
+  {:ok, %Event{type: :order_paid} = event} ->
+    fulfill_order(
+      reference: Event.reference(event),      # your reference_id
+      amount:    Event.amount(event),
+      email:     Event.customer_email(event),
+      last4:     Event.card_last4(event)
+    )
     Plug.Conn.send_resp(conn, 200, "")
 
-  {:ok, %Inkress.Webhook.Event{type: :merchant_registered, raw: raw}} ->
+  {:ok, %Event{type: :merchant_registered, raw: raw}} ->
     store_api_credentials(raw["secret_key"], raw["public_key"])
     Plug.Conn.send_resp(conn, 200, "")
 
@@ -123,17 +167,26 @@ case Inkress.Webhooks.verify(signature, System.fetch_env!("INKRESS_WEBHOOK_SECRE
 end
 ```
 
-`Inkress.verify_webhook/2` is a convenience alias.
+`Inkress.verify_webhook/2` is a convenience alias. The current provider webhook is
+delivered as a `jwt` form field, so read it with `conn.params["jwt"]` where that applies;
+the modern webhook uses the `x-inkress-signature` header. Either way, pass the JWT string
+to `verify/2`.
 
 ### Event types
 
-`event.type` is one of these atoms (unrecognised or type-less payloads resolve to
-`:unknown`, never an error):
+`event.type` is a stable atom parsed from either shape (unrecognised or type-less payloads
+resolve to `:unknown`, never an error). Order events are `orders.<status>` on the wire and
+map to `:order_<status>`:
 
-`:merchant_registered`, `:order_created`, `:order_paid`, `:order_failed`,
-`:order_cancelled`, `:payment_authorized`, `:payment_captured`, `:payment_failed`.
+`:merchant_registered`, `:order_created`, `:order_paid`, `:order_pending`, `:order_failed`,
+`:order_cancelled`, `:order_refunded`, `:order_prepared`, `:order_shipped`, `:order_delivered`,
+`:order_completed`, `:order_returned`, `:order_verifying`, `:payment_authorized`,
+`:payment_captured`, `:payment_failed`, `:payment_link_visited`, `:subscription_created`,
+`:subscription_cancelled`.
 
-The full event is always available under `event.raw`.
+Prefer the accessors (`Event.status/1`, `reference/1`, `amount/1`, `customer_email/1`,
+`card_last4/1`, `order/1`, `title/1`) over reaching into `event.data`/`event.raw` — they
+read the right place for both wire shapes. The full event is always under `event.raw`.
 
 ## Configuration
 

@@ -62,6 +62,66 @@ defmodule Inkress.WebhooksTest do
     end
   end
 
+  describe "accessors across both wire shapes" do
+    # FLAT provider/facilitator payload — exactly what commerce-api's
+    # order_to_webhook/2 emits (and what Curator receives).
+    @flat_paid %{
+      "facilitator" => "Inkress",
+      "provider" => "fac",
+      "status" => "paid",
+      "reference" => "4821",
+      "currency" => "JMD",
+      "title" => "Invoice #4821 — Deep Cleaning",
+      "amount" => 33_600,
+      "card_suffix" => "1821",
+      "card_brand" => "MasterCard",
+      "client" => %{"name" => "Jane Doe", "email" => "jane@example.com"}
+    }
+
+    # MODERN nested payload — the documented webhook_urls shape (top-level "order").
+    @modern_paid %{
+      "event" => "orders.paid",
+      "facilitator" => "Inkress",
+      "order" => %{
+        "id" => 2345,
+        "status" => "paid",
+        "total" => 14_000,
+        "reference" => "53837|42iyvtv",
+        "currency" => "JMD",
+        "title" => "Deep Cleaning",
+        "customer" => %{"email" => "customer@example.com"},
+        "payment_details" => %{"provider" => "fac", "brand" => "MasterCard", "last4" => "1821"}
+      }
+    }
+
+    test "flat provider payload resolves type from status and reads every field" do
+      {:ok, event} = Inkress.Webhooks.verify(sign(@flat_paid), @secret)
+
+      assert event.type == :order_paid
+      assert event.event == nil
+      assert Event.status(event) == "paid"
+      assert Event.reference(event) == "4821"
+      assert Event.amount(event) == 33_600
+      assert Event.customer_email(event) == "jane@example.com"
+      assert Event.card_last4(event) == "1821"
+      assert Event.title(event) == "Invoice #4821 — Deep Cleaning"
+    end
+
+    test "modern nested payload resolves type from event and reads every field" do
+      {:ok, event} = Inkress.Webhooks.verify(sign(@modern_paid), @secret)
+
+      assert event.type == :order_paid
+      assert event.event == "orders.paid"
+      assert Event.status(event) == "paid"
+      assert Event.reference(event) == "53837|42iyvtv"
+      assert Event.amount(event) == 14_000
+      assert Event.customer_email(event) == "customer@example.com"
+      assert Event.card_last4(event) == "1821"
+      assert Event.title(event) == "Deep Cleaning"
+      assert Event.order(event)["id"] == 2345
+    end
+  end
+
   describe "verify/2 rejects bad input" do
     test "returns {:error, :invalid_signature} when the secret is wrong" do
       jwt = sign(@order_paid, @secret)

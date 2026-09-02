@@ -11,6 +11,10 @@ defmodule Inkress.HTTP do
   @spec post(Client.t(), String.t(), map() | nil) :: {:ok, term()} | {:error, Error.t()}
   def post(%Client{} = client, path, body), do: request(client, :post, path, body)
 
+  @doc "Issue a GET and return the unwrapped payload or an error."
+  @spec get(Client.t(), String.t()) :: {:ok, term()} | {:error, Error.t()}
+  def get(%Client{} = client, path), do: request(client, :get, path, nil)
+
   defp request(%Client{} = client, method, path, body) do
     req = %{
       method: method,

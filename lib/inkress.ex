@@ -27,7 +27,7 @@ defmodule Inkress do
   See `Inkress.Orders` and `Inkress.Webhooks` for details.
   """
 
-  alias Inkress.{Client, Orders, Webhooks}
+  alias Inkress.{Client, Orders, PaymentLinks, Webhooks}
 
   @doc """
   Build an API client. See `Inkress.Client.new/1` for options.
@@ -40,6 +40,13 @@ defmodule Inkress do
   """
   @spec create_order(Client.t(), map()) :: {:ok, Inkress.Order.t()} | {:error, Inkress.Error.t()}
   defdelegate create_order(client, params), to: Orders, as: :create
+
+  @doc """
+  Create a payment link (server-side checkout). See `Inkress.PaymentLinks.create/2`.
+  """
+  @spec create_payment_link(Client.t(), map()) ::
+          {:ok, Inkress.PaymentLink.t()} | {:error, Inkress.Error.t()}
+  defdelegate create_payment_link(client, params), to: PaymentLinks, as: :create
 
   @doc """
   Verify a webhook signature. See `Inkress.Webhooks.verify/2`.
