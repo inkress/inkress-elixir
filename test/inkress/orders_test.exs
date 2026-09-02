@@ -56,14 +56,14 @@ defmodule Inkress.OrdersTest do
       assert {"client-id", "m-my-store"} in req.headers
     end
 
-    test "JSON-encodes the params in the body and defaults kind to \"order\"" do
+    test "JSON-encodes the params in the body and defaults kind to \"online\"" do
       Inkress.Orders.create(client(), @params)
 
       assert_received {:http_request, req, _opts}
       body = Jason.decode!(req.body)
       assert body["currency_code"] == "JMD"
       assert body["total"] == 2999
-      assert body["kind"] == "order"
+      assert body["kind"] == "online"
       assert body["customer"]["email"] == "a@b.com"
       assert [%{"id" => 1, "quantity" => 2}] = body["products"]
     end
@@ -154,7 +154,7 @@ defmodule Inkress.OrdersTest do
       body = Jason.decode!(req.body)
       assert body["total"] == 5000
       assert body["currency_code"] == "JMD"
-      assert body["kind"] == "order"
+      assert body["kind"] == "online"
       refute Map.has_key?(body, "products")
     end
 

@@ -16,6 +16,9 @@ defmodule Inkress.Order do
           customer: map() | nil,
           data: map() | nil,
           created_at: String.t() | nil,
+          uid: String.t() | nil,
+          payment_urls: map() | nil,
+          invoice_url: String.t() | nil,
           raw: map()
         }
 
@@ -30,6 +33,9 @@ defmodule Inkress.Order do
     :customer,
     :data,
     :created_at,
+    :uid,
+    :payment_urls,
+    :invoice_url,
     :raw
   ]
 
@@ -46,7 +52,25 @@ defmodule Inkress.Order do
       customer: map["customer"],
       data: map["data"],
       created_at: map["created_at"],
+      uid: map["uid"],
+      payment_urls: map["payment_urls"],
+      invoice_url: map["invoice_url"],
       raw: map
     }
   end
+
+  @doc """
+  The customer-facing URL to pay this order — where you redirect the buyer.
+
+  Prefers `invoice_url`, then `payment_urls.payment_url`, then
+  `payment_urls.short_link`. Returns `nil` if the order carries no pay URL
+  (e.g. an already-paid or zero-total order).
+  """
+  @spec pay_url(t()) :: String.t() | nil
+  def pay_url(%__MODULE__{invoice_url: url}) when is_binary(url) and url != "", do: url
+
+  def pay_url(%__MODULE__{payment_urls: urls}) when is_map(urls),
+    do: urls["payment_url"] || urls["short_link"]
+
+  def pay_url(_order), do: nil
 end
