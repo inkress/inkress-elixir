@@ -5,8 +5,8 @@ A thin, idiomatic Elixir wrapper for the [Inkress](https://inkress.com) API.
 Scope is deliberately small — two things:
 
 - **Create orders** — `Inkress.Orders.create/2` (`POST /api/v1/orders`)
-- **Verify webhooks** — `Inkress.Webhooks.verify/2` (checks the `x-inkress-signature`
-  HS256 JWT and hands you a typed event)
+- **Verify webhooks** — `Inkress.Webhooks.verify/2` (checks an HS256 JWT and returns its
+  claims as an event)
 
 Everything returns idiomatic `{:ok, _}` / `{:error, _}` tuples. No global state, no
 config files required — you pass an explicit client.
@@ -97,21 +97,21 @@ usual. See `docs/custom-pricing-design.md` for the design and trust model.
 
 ## Verifying a webhook
 
-Inkress signs every webhook as an HS256 JWT (signed with your `whsec_…` webhook
-secret) and delivers it in the `x-inkress-signature` header. The JWT's claims *are*
-the event. `verify/2` checks the signature and returns a typed event — no client needed.
+`Inkress.Webhooks.verify(jwt, secret)` verifies an HS256 JWT and returns its claims as an
+`%Inkress.Webhook.Event{}`. Inkress puts that JWT in the **`jwt` field of the JSON body** of order
+notifications (`orders.*`) and merchant events (`subscription.*`, `card_charge.*`,
+`refund.completed`), signed with the merchant's **client secret** (the `secret_key` from the
+registration webhook). There is no `x-inkress-signature` header.
 
 ```elixir
-# In a Plug/Phoenix controller
-signature = conn |> Plug.Conn.get_req_header("x-inkress-signature") |> List.first()
-
-case Inkress.Webhooks.verify(signature, System.fetch_env!("INKRESS_WEBHOOK_SECRET")) do
-  {:ok, %Inkress.Webhook.Event{type: :order_paid, data: data}} ->
-    fulfill_order(data["order"])
+# In a Plug/Phoenix controller, with the JSON body already parsed
+case Inkress.Webhooks.verify(conn.body_params["jwt"], System.fetch_env!("INKRESS_CLIENT_SECRET")) do
+  {:ok, %Inkress.Webhook.Event{raw: %{"event" => "orders.paid"} = claims}} ->
+    fulfill_order(claims["order"])
     Plug.Conn.send_resp(conn, 200, "")
 
-  {:ok, %Inkress.Webhook.Event{type: :merchant_registered, raw: raw}} ->
-    store_api_credentials(raw["secret_key"], raw["public_key"])
+  {:ok, %Inkress.Webhook.Event{raw: %{"event" => "subscription.renewed", "data" => data}}} ->
+    extend_access(data["subscription"])
     Plug.Conn.send_resp(conn, 200, "")
 
   {:ok, _other} ->
@@ -125,15 +125,28 @@ end
 
 `Inkress.verify_webhook/2` is a convenience alias.
 
+What `verify/2` does not cover:
+
+- **`subscriptions.*` notifications** (plural) carry no `jwt`. Verify their
+  `X-Inkress-Webhook-Signature` header instead: base64 HMAC-SHA256 of the raw body with the
+  client secret,
+  `:crypto.mac(:hmac, :sha256, secret, raw_body) |> Base.encode64()`.
+- **Webhook rows created by an OAuth app** sign that header with the app's `whsec_…` secret; the
+  body `jwt` is still signed with the merchant's client secret, so an app verifies the header.
+- **The registration webhook** (`%{"action" => "registration", "secret_key" => …}`) is not signed.
+
+Event names and payloads: commerce-api `docs/webhooks.md`.
+
 ### Event types
 
-`event.type` is one of these atoms (unrecognised or type-less payloads resolve to
-`:unknown`, never an error):
-
-`:merchant_registered`, `:order_created`, `:order_paid`, `:order_failed`,
-`:order_cancelled`, `:payment_authorized`, `:payment_captured`, `:payment_failed`.
-
-The full event is always available under `event.raw`.
+`event.type` maps the claim `"type"` to one of `:merchant_registered`, `:order_created`,
+`:order_paid`, `:order_failed`, `:order_cancelled`, `:payment_authorized`, `:payment_captured`,
+`:payment_failed`, or `:unknown`. None of those wire names (`"order.paid"`, …) is sent by Inkress
+today: order notifications have no `"type"` claim and merchant events use names such as
+`"subscription.renewed"`, so `event.type` is `:unknown` for every current webhook. Match on
+`event.raw["event"]` (present on every signed webhook) instead. `event.data` is the claim
+`"data"` (set on merchant events, `nil` on order notifications); the full claims are always in
+`event.raw`.
 
 ## Configuration
 
